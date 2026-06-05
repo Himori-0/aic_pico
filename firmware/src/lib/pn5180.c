@@ -560,17 +560,72 @@ bool pn5180_mifare_read(uint8_t block_id, uint8_t block_data[16])
     return true;
 }
 
+bool pn5180_felica_read_blocks(uint16_t svc_code, uint8_t block_count,
+                               const uint16_t block_ids[], uint8_t block_data[][16])
+{
+    if ((block_count == 0) || (block_count > 8)) {
+        return false;
+    }
+
+    uint8_t cmd[14 + block_count * 2];
+    uint8_t pos = 0;
+    cmd[pos++] = sizeof(cmd);
+    cmd[pos++] = 0x06;
+    memcpy(cmd + pos, idm_cache, 8);
+    pos += 8;
+    cmd[pos++] = 0x01;
+    cmd[pos++] = svc_code & 0xff;
+    cmd[pos++] = svc_code >> 8;
+    cmd[pos++] = block_count;
+    for (uint8_t i = 0; i < block_count; i++) {
+        cmd[pos++] = block_ids[i] >> 8;
+        cmd[pos++] = block_ids[i] & 0xff;
+    }
+
+	pn5180_send_data(cmd, sizeof(cmd), 0x00);
+    sleep_ms(1);
+
+    uint8_t out[13 + block_count * 16];
+    memset(out, 0, sizeof(out));
+    pn5180_read_data(out, sizeof(out));
+
+    if ((out[0] != sizeof(out)) || (out[1] != 0x07) ||
+        (out[10] != 0x00) || (out[11] != 0x00) || (out[12] != block_count)) {
+        DEBUG("\nPN5180 Felica read failed [%04x:%02x]", svc_code, block_count);
+        memset(block_data, 0, block_count * 16);
+        return false;
+    }
+
+    memcpy(block_data, out + 13, block_count * 16);
+    return true;
+}
+
 bool pn5180_felica_read(uint16_t svc_code, uint16_t block_id, uint8_t block_data[16])
 {
-    uint8_t cmd[] = {0x10, 0x06, 
+    uint16_t block_ids[] = { block_id };
+    uint8_t blocks[1][16];
+    if (!pn5180_felica_read_blocks(svc_code, 1, block_ids, blocks)) {
+        memset(block_data, 0, 16);
+        return false;
+    }
+    memcpy(block_data, blocks[0], 16);
+    return true;
+}
+
+bool pn5180_felica_write(uint16_t svc_code, uint16_t block_id, const uint8_t block_data[16])
+{
+    uint8_t cmd[] = {0x20, 0x08,
                     idm_cache[0], idm_cache[1],
                     idm_cache[2], idm_cache[3],
                     idm_cache[4], idm_cache[5],
                     idm_cache[6], idm_cache[7],
                     0x01, svc_code & 0xff, svc_code >> 8,
-                    0x01, block_id >> 8, block_id & 0xff};
+                    0x01, block_id >> 8, block_id & 0xff,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0};
+    memcpy(cmd + 16, block_data, 16);
 
-	pn5180_send_data(cmd, sizeof(cmd), 0x00);
+    pn5180_send_data(cmd, sizeof(cmd), 0x00);
     sleep_ms(1);
 
     struct __attribute__((packed)) {
@@ -578,18 +633,15 @@ bool pn5180_felica_read(uint16_t svc_code, uint16_t block_id, uint8_t block_data
         uint8_t cmd;
         uint8_t idm[8];
         uint16_t status;
-        uint8_t block_num;
-        uint8_t data[16];
     } out = { 0 };
     pn5180_read_data((uint8_t *)&out, sizeof(out));
 
-    if ((out.len != sizeof(out)) || (out.cmd != 0x07) || (out.status != 0x00)) {
-        DEBUG("\nPN5180 Felica read failed [%04x:%04x]", svc_code, block_id);
-        memset(block_data, 0, 16);
+    if ((out.len != sizeof(out)) || (out.cmd != 0x09) || (out.status != 0x00)) {
+        DEBUG("\nPN5180 Felica WRITE failed [%04x:%04x]", svc_code, block_id);
         return false;
     }
 
-    memcpy(block_data, out.data, 16);
+    DEBUG("\nPN5180 Felica WRITE success [%04x:%04x]", svc_code, block_id);
     return true;
 }
 

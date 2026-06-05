@@ -13,15 +13,19 @@
 #include "save.h"
 #include "cli.h"
 
-#include "keypad.h"
 #include "light.h"
+#ifndef AIC_BASE_ONLY
+#include "keypad.h"
 #include "lis3dh.h"
+#endif
 
 #include "aime.h"
 #include "bana.h"
 #include "nfc.h"
 
+#ifndef AIC_BASE_ONLY
 #include "cardio.h"
+#endif
 
 static int fps[2];
 void fps_count(int core)
@@ -51,7 +55,9 @@ static void display_sys()
     #endif
     printf("  Processor: %s\n", cpu);
     printf("  Clock: %d MHz\n", mhz);
+#ifndef AIC_BASE_ONLY
     printf("  LIS3DH: %s\n", lis3dh_is_present() ? "Present" : "N/A");
+#endif
 }
 
 static void display_nfc()
@@ -72,10 +78,12 @@ static void display_light()
 
 static void display_lcd()
 {
+#ifndef AIC_BASE_ONLY
     printf("[LCD]\n");
     printf("    Backlight: %d\n", aic_cfg->lcd.backlight);
     const char *orient_str[] = { "Auto", "Up", "Down" };
     printf("    Orientation: %s\n", orient_str[aic_cfg->lcd.orientation % 3]);
+#endif
 }
 
 static void display_reader()
@@ -91,6 +99,7 @@ static void display_reader()
     }
 }
 
+#ifndef AIC_BASE_ONLY
 static void disp_list()
 {
     for (int i = 0; i < 4; i++) {
@@ -113,19 +122,24 @@ static void disp_list()
         printf("\n");
     }
 }
+#endif
 
 static void display_autopin()
 {
+#ifndef AIC_BASE_ONLY
     printf("[AUTO PIN-Entry]\n");
     printf("    Status: %s\n", aic_cfg->autopin.enabled ? "ON" : "OFF");
     disp_list();
+#endif
 }
 
 static void display_warning()
 {
+#ifndef AIC_BASE_ONLY
     if (keypad_is_stuck()) {
         printf("\nWarning: Keypad disabled due to key STUCK!\n");
     }
+#endif
 }
 
 static void handle_display()
@@ -158,7 +172,10 @@ static void handle_nfc()
     nfc_card_t card = nfc_detect_card();
     nfc_rf_field(false);
 
-    printf("Card: %s", nfc_card_name_str(card.card_type));
+    nfc_card_name card_name = nfc_last_card_name();
+    printf("Card: %s", (card_name == CARD_NONE)
+           ? nfc_card_type_str(card.card_type)
+           : nfc_card_name_str(card_name));
     for (int i = 0; i < card.len; i++) {
         printf(" %02x", card.uid[i]);
     }
@@ -306,6 +323,9 @@ static void handle_level(int argc, char *argv[])
     display_light();
 }
 
+#ifdef AIC_BASE_ONLY
+/* LCD command is intentionally omitted from the base firmware. */
+#else
 static void handle_lcd(int argc, char *argv[])
 {
     const char *usage = "Usage: lcd backlight [0..255]\n"
@@ -343,7 +363,9 @@ static void handle_lcd(int argc, char *argv[])
     config_changed();
     display_lcd();
 }
+#endif
 
+#ifndef AIC_BASE_ONLY
 static void autopin_onoff(bool on)
 {
     aic_cfg->autopin.enabled = on;
@@ -501,6 +523,7 @@ static void handle_autopin(int argc, char *argv[])
 
     printf("%s", usage);
 }
+#endif
 
 static void handle_debug()
 {
@@ -520,7 +543,9 @@ void commands_init()
     cli_register("light", handle_light, "Turn on/off lights.");
     cli_register("rgb-order", handle_rgb_order, "Set RGB order.");
     cli_register("level", handle_level, "Set light level.");
+#ifndef AIC_BASE_ONLY
     cli_register("lcd", handle_lcd, "Touch LCD settings.");
     cli_register("autopin", handle_autopin, "Auto pin-entry.");
+#endif
     cli_register("debug", handle_debug, "Toggle debug.");
 }

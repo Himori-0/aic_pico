@@ -15,30 +15,42 @@ function(make_firmware board board_def)
         set(board ${board}_rp2350)
     endif()
 
-    add_executable(${board}
-                   main.c save.c config.c commands.c light.c keypad.c cardio.c
-                   cst816t.c st7789.c lis3dh.c gui.c gfx.c rle.c
-                   cli.c usb_descriptors.c)
+    set(firmware_sources
+        main.c save.c config.c commands.c light.c
+        cli.c usb_descriptors.c)
+
+    if(NOT ARGN)
+        list(APPEND firmware_sources
+             keypad.c cardio.c cst816t.c st7789.c lis3dh.c gui.c gfx.c rle.c)
+    endif()
+
+    add_executable(${board} ${firmware_sources})
 
     target_compile_definitions(${board} PUBLIC ${board_def}
                                PICO_XOSC_STARTUP_DELAY_MULTIPLIER=20)
+
+    if(ARGN)
+        target_compile_definitions(${board} PUBLIC AIC_BASE_ONLY)
+    endif()
 
     pico_enable_stdio_usb(${board} 1)
 
     pico_generate_pio_header(${board} ${CMAKE_CURRENT_LIST_DIR}/ws2812.pio)
     
     target_link_libraries(${board} PRIVATE
-        aic hardware_pio hardware_pwm hardware_dma hardware_flash)
+        aic pico_flash hardware_exception
+        hardware_pio hardware_pwm hardware_dma hardware_flash)
 
     pico_add_extra_outputs(${board})
 
     add_custom_command(TARGET ${board} PRE_BUILD
-    COMMAND touch ${CMAKE_CURRENT_SOURCE_DIR}/cli.c)
+                       COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_CURRENT_SOURCE_DIR}/cli.c)
 
     add_custom_command(TARGET ${board} POST_BUILD
-                       COMMAND cp ${board}.uf2 ${CMAKE_CURRENT_LIST_DIR}/..)
+                       COMMAND ${CMAKE_COMMAND} -E copy ${board}.uf2 ${CMAKE_CURRENT_LIST_DIR}/..)
 endfunction()
 
 add_library(aic lib/aime.c lib/bana.c lib/pn532.c lib/pn5180.c lib/nfc.c lib/mode.c)
 
 make_firmware(aic_pico BOARD_AIC_PICO)
+make_firmware(aic_pico_base BOARD_AIC_PICO BASE_ONLY)

@@ -20,7 +20,7 @@ reader_mode_t mode_detect(const uint8_t *data, uint32_t len, uint32_t baudrate)
     last_detect_time = time_us_64();
 
     if ((len > 2) && (data[0] == 0xe0) && (data[1] < 0x10)) {
-        return baudrate == 115200 ? MODE_AIME0 : MODE_AIME1;
+        return baudrate == 115200 ? MODE_AIME1 : MODE_AIME0;
     }
 
     if ((len == 1) && (data[0] == 0x55)) {

@@ -33,6 +33,8 @@ bool pn532_mifare_auth(const uint8_t uid[4], uint8_t block_id, uint8_t key_id, c
 bool pn532_mifare_read(uint8_t block_id, uint8_t block_data[16]);
 
 bool pn532_felica_read(uint16_t svc_code, uint16_t block_id, uint8_t block_data[16]);
+bool pn532_felica_read_blocks(uint16_t svc_code, uint8_t block_count,
+                              const uint16_t block_ids[], uint8_t block_data[][16]);
 bool pn532_felica_write(uint16_t svc_code, uint16_t block_id, const uint8_t block_data[16]);
 
 void pn532_select(int phase);

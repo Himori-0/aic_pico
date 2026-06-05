@@ -6,7 +6,7 @@
 #if defined BOARD_AIC_PICO
 
 #define I2C_PORT_LIST { { i2c0, 21, 20 }, { i2c1, 19, 18 }, { i2c0, 17, 16 }, { i2c1, 27, 26 } }
-#define I2C_FREQ 433*1000
+#define I2C_FREQ 100*1000
 
 #define SPI_PORT spi0
 #define SPI_MISO 16

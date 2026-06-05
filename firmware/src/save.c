@@ -14,6 +14,7 @@
 #include <memory.h>
 
 #include "pico/bootrom.h"
+#include "pico/flash.h"
 #include "pico/stdio.h"
 
 #include "hardware/flash.h"

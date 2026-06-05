@@ -308,6 +308,7 @@ For most of the part, just follow the guide of AIC key.
 * One USB serial port is for command line. You can use this Web Serial Terminal to connect to it. (Note: "?" is for help)  
   https://googlechromelabs.github.io/serial-terminal/
 * The other serial port is for reader protocol, currently SEGA AIME and Bandai Namco are supported.
+* See [AIME Reader Protocol and Timing](READER_PROTOCOL.md) for framing, commands, FeliCa challenge flow, and timing details.
 * Spicetools cardio (Card I/O) HID is always enabled unless a reader protocol is active;
 * If your PN5180 module has an issue with Mifare (Such as AIME and Bana Passport) reading, you can try enable the PN5180 TX tweak by "pn5180_tweak on" command.
 * Some command line commands:

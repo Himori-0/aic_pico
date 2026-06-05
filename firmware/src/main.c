@@ -9,6 +9,7 @@
 
 #include "pico/stdio.h"
 #include "pico/stdlib.h"
+#include "pico/flash.h"
 #include "bsp/board.h"
 #include "pico/multicore.h"
 #include "pico/bootrom.h"
@@ -33,14 +34,17 @@
 #include "config.h"
 #include "cli.h"
 #include "commands.h"
-#include "cardio.h"
 #include "light.h"
+#ifndef AIC_BASE_ONLY
+#include "cardio.h"
 #include "keypad.h"
 #include "lis3dh.h"
 #include "gui.h"
+#endif
 
 #define DEBUG(...) if (aic_runtime.debug) printf(__VA_ARGS__)
 
+#ifndef AIC_BASE_ONLY
 struct __attribute__((packed)) {
     uint8_t modifier;
     uint8_t keymap[15];
@@ -90,13 +94,18 @@ void report_usb_hid()
 }
 
 static uint64_t last_hid_time = 0;
+#endif
 
 static bool hid_light_is_active()
 {
+#ifdef AIC_BASE_ONLY
+    return false;
+#else
     if (last_hid_time == 0) {
         return false;
     }
     return (time_us_64() - last_hid_time) < 2000000;
+#endif
 }
 
 static bool reader_is_active()
@@ -123,10 +132,12 @@ static void core1_init()
 {
     flash_safe_execute_core_init();
 
+#ifndef AIC_BASE_ONLY
     if (aic_runtime.touch) {
         gui_init();
         gui_level(aic_cfg->lcd.backlight);
     }
+#endif
 }
 
 static void core1_loop()
@@ -136,9 +147,11 @@ static void core1_loop()
     core1_init();
 
     while (1) {
+#ifndef AIC_BASE_ONLY
         if (aic_runtime.touch) {
             gui_loop();
         }
+#endif
         light_update();
 
         light_mode_update();
@@ -151,7 +164,11 @@ static void core1_loop()
 
 void card_name_update_cb(nfc_card_name card_name)
 {
+#ifndef AIC_BASE_ONLY
     gui_report_card_name(card_name);
+#else
+    (void)card_name;
+#endif
 }
 
 const int reader_intf = 1;
@@ -221,6 +238,21 @@ static void reader_light()
     }
 }
 
+static int aime_sub_mode_for_current_baud(reader_mode_t mode)
+{
+    cdc_line_coding_t coding;
+    tud_cdc_n_get_line_coding(reader_intf, &coding);
+
+    if (coding.bit_rate == 38400) {
+        return 0;
+    }
+    if (coding.bit_rate == 115200) {
+        return 1;
+    }
+
+    return mode == MODE_AIME0 ? 0 : 1;
+}
+
 static void reader_run()
 {
     reader_poll_data();
@@ -234,7 +266,7 @@ static void reader_run()
             case MODE_AIME0:
             case MODE_AIME1:
                 reader.pos = 0;
-                aime_sub_mode(aic_runtime.mode == MODE_AIME0 ? 0 : 1);
+                aime_sub_mode(aime_sub_mode_for_current_baud(aic_runtime.mode));
                 for (int i = 0; i < count; i++) {
                     aime_feed(buf[i]);
                 }
@@ -255,8 +287,10 @@ static void reader_run()
 
 void wait_loop()
 {
+#ifndef AIC_BASE_ONLY
     keypad_update();
     report_hid_key();
+#endif
 
     tud_task();
     cli_run();
@@ -274,17 +308,23 @@ static void core0_loop()
         reader_run();
 
         if (reader_is_active()) {
+#ifndef AIC_BASE_ONLY
             cardio_clear();
+#endif
         }
         else {
+#ifndef AIC_BASE_ONLY
             cardio_run(hid_light_is_active());
+#endif
         }
-        
+
+#ifndef AIC_BASE_ONLY
         keypad_update();
         report_usb_hid();
 
         lis3dh_update();
-    
+#endif
+
         save_loop();
         cli_fps_count(0);
         sleep_ms(1);
@@ -299,27 +339,26 @@ static void spi_overclock()
 
 static void identify_touch()
 {
+#ifdef AIC_BASE_ONLY
+    aic_runtime.touch = false;
+#else
     gpio_init(AIC_TOUCH_EN);
     gpio_set_function(AIC_TOUCH_EN, GPIO_FUNC_SIO);
     gpio_set_dir(AIC_TOUCH_EN, GPIO_IN);
     gpio_pull_up(AIC_TOUCH_EN);
     sleep_us(0);
     aic_runtime.touch = !gpio_get(AIC_TOUCH_EN);
+#endif
 }
 
 static void find_nfc_module()
 {
-    if (nfc_init_spi(SPI_PORT, SPI_MISO, SPI_SCK, SPI_MOSI,
-                     SPI_RST, SPI_NSS, SPI_BUSY)) {
-        return;
-    }
-
     static struct {
         i2c_inst_t *port;
         uint8_t scl;
         uint8_t sda;
     } i2c[] = I2C_PORT_LIST;
-    
+
     for (int retry = 0; retry < 3; retry++) {
         for (int i = 0; i < count_of(i2c); i++) {
             if (nfc_init_i2c(i2c[i].port, i2c[i].scl, i2c[i].sda, I2C_FREQ)) {
@@ -327,6 +366,11 @@ static void find_nfc_module()
             }
         }
         sleep_ms(200);
+    }
+
+    if (nfc_init_spi(SPI_PORT, SPI_MISO, SPI_SCK, SPI_MOSI,
+                     SPI_RST, SPI_NSS, SPI_BUSY)) {
+        return;
     }
 }
 
@@ -351,7 +395,9 @@ void init()
     light_rainbow(1, 0, aic_cfg->light.level_idle);
 
     if (!aic_runtime.touch) {
+#ifndef AIC_BASE_ONLY
         keypad_init();
+#endif
     }
 
     pico_led_off();
@@ -361,16 +407,27 @@ void init()
     find_nfc_module();
 
     nfc_set_wait_loop(wait_loop);
+#ifndef AIC_BASE_ONLY
     nfc_set_card_name_listener(card_name_update_cb);
+#endif
 
     aime_init(cdc_reader_putc);
     aime_virtual_aic(aic_cfg->reader.virtual_aic);
     bana_init(cdc_reader_putc);
 
+#ifndef AIC_BASE_ONLY
     lis3dh_init(i2c0, 0x4);
+#endif
 
-    cli_init("aic_pico>", "\n     << AIC Pico >>\n"
-                            " https://github.com/whowechina\n\n");
+    cli_init(
+#ifdef AIC_BASE_ONLY
+        "aic_pico_base>",
+        "\n  << AIC Pico Base >>\n"
+#else
+        "aic_pico>",
+        "\n     << AIC Pico >>\n"
+#endif
+        " https://github.com/whowechina\n\n");
     
     commands_init();
 }
@@ -378,6 +435,9 @@ void init()
 /* if certain key pressed when booting, enter update mode */
 static void boot_update_check()
 {
+#ifdef AIC_BASE_ONLY
+    return;
+#else
     const uint8_t pins[] = { 10, 11 }; // keypad 00 and *
     bool all_pressed = true;
     for (int i = 0; i < sizeof(pins); i++) {
@@ -398,6 +458,7 @@ static void boot_update_check()
         reset_usb_boot(0, 2);
         return;
     }
+#endif
 }
 
 static void sys_init()
@@ -417,6 +478,7 @@ int main(void)
     return 0;
 }
 
+#ifndef AIC_BASE_ONLY
 // Invoked when received GET_REPORT control request
 // Application must fill buffer report's content and return its length.
 // Return zero will cause the stack to STALL request
@@ -442,6 +504,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id,
         }
     }
 }
+#endif
 
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
 {

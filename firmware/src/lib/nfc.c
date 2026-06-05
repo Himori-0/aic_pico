@@ -59,6 +59,7 @@ static const char *card_name_str[] = {
     "Amusement IC Bandai Namco",
     "Amusement IC NESiCA",
     "Amusement IC Virtual",
+    "Suica/Transit",
     "MIFARE Generic",
     "AIME",
     "Bandai Namco Passport",
@@ -122,6 +123,9 @@ const char *nfc_lookup_felica_syscode(uint16_t syscode)
 }
 
 #define CARD_INFO_TIMEOUT_US (1000 * 1000)
+#define FELICA_SYSCODE_AIC 0x88B4
+#define FELICA_SYSCODE_SUICA 0x0003
+#define FELICA_SYSCODE_LITE_S 0xFE00
 
 static struct {
     uint16_t atqa;
@@ -170,6 +174,11 @@ nfc_card_name nfc_last_card_name()
     return last_card_name;
 }
 
+static bool felica_syscode_is_suica_compatible(uint16_t syscode)
+{
+    return (syscode == FELICA_SYSCODE_SUICA) || (syscode == FELICA_SYSCODE_LITE_S);
+}
+
 #define func_null NULL
 struct {
     const char *(*firmware_ver)();
@@ -180,6 +189,9 @@ struct {
     bool (*mifare_auth)(const uint8_t uid[4], uint8_t block_id, uint8_t key_id, const uint8_t key[6]);
     bool (*mifare_read)(uint8_t block_id, uint8_t block_data[16]);
     bool (*felica_read)(uint16_t svc_code, uint16_t block_id, uint8_t block_data[16]);
+    bool (*felica_read_blocks)(uint16_t svc_code, uint8_t block_count,
+                               const uint16_t block_ids[], uint8_t block_data[][16]);
+    bool (*felica_write)(uint16_t svc_code, uint16_t block_id, const uint8_t block_data[16]);
     void (*set_wait_loop)(nfc_wait_loop_t loop);
     void (*select)(int phase);
     void (*deselect)();
@@ -191,6 +203,8 @@ struct {
         pn532_rf_field,
         pn532_mifare_auth, pn532_mifare_read,
         pn532_felica_read,
+        pn532_felica_read_blocks,
+        pn532_felica_write,
         pn532_set_wait_loop,
         pn532_select,
         pn532_deselect,
@@ -202,6 +216,8 @@ struct {
         pn5180_rf_field,
         pn5180_mifare_auth, pn5180_mifare_read,
         pn5180_felica_read,
+        pn5180_felica_read_blocks,
+        pn5180_felica_write,
         pn5180_set_wait_loop,
         pn5180_select,
         pn5180_deselect,
@@ -399,6 +415,74 @@ static bool nfc_detect_vicinity(nfc_card_t *card)
     return true;
 }
 
+static bool mifare_block_is_bana(const uint8_t block_data[16])
+{
+    return memcmp(block_data + 2, "NBGIC", 5) == 0;
+}
+
+static bool detect_mifare_bana(const nfc_card_t *card)
+{
+    uint8_t block_data[16];
+    static const uint8_t aime_key_a[6] = { 0x60, 0x90, 0xd0, 0x06, 0x32, 0xf5 };
+    static const uint8_t wccf_key_b[6] = { 'W', 'C', 'C', 'F', 'v', '2' };
+
+    if (!api[nfc_module].mifare_read) {
+        return false;
+    }
+
+    if (api[nfc_module].mifare_read(0x01, block_data) &&
+        mifare_block_is_bana(block_data)) {
+        return true;
+    }
+
+    if (!api[nfc_module].mifare_auth || (card->len < 4)) {
+        return false;
+    }
+
+    if (api[nfc_module].mifare_auth(card->uid, 0x03, 0, aime_key_a) &&
+        api[nfc_module].mifare_read(0x01, block_data) &&
+        mifare_block_is_bana(block_data)) {
+        return true;
+    }
+
+    if (api[nfc_module].mifare_auth(card->uid, 0x03, 1, wccf_key_b) &&
+        api[nfc_module].mifare_read(0x01, block_data) &&
+        mifare_block_is_bana(block_data)) {
+        return true;
+    }
+
+    return false;
+}
+
+static bool detect_later_felica(nfc_card_t *card)
+{
+    for (uint8_t i = 0; i < 3; i++) {
+        if (nfc_detect_felica(card)) {
+            return true;
+        }
+        sleep_ms(8);
+    }
+
+    return false;
+}
+
+static void report_detected_card(const nfc_card_t *card)
+{
+    if (card->card_type == NFC_CARD_FELICA) {
+        uint16_t syscode = ((uint16_t)card->syscode[0] << 8) | card->syscode[1];
+        if (syscode == FELICA_SYSCODE_AIC) {
+            update_card_name(CARD_AIC, false);
+        } else if (felica_syscode_is_suica_compatible(syscode)) {
+            update_card_name(CARD_SUICA, true);
+        }
+    } else if (card->card_type == NFC_CARD_MIFARE) {
+        update_card_name(detect_mifare_bana(card) ? CARD_BANA : CARD_MIFARE,
+                         detect_mifare_bana(card));
+    } else if (card->card_type == NFC_CARD_VICINITY) {
+        update_card_name(CARD_VICINITY, false);
+    }
+}
+
 void nfc_rf_field(bool on)
 {
     if (api[nfc_module].rf_field) {
@@ -418,24 +502,25 @@ static void update_last_card(const nfc_card_t *card)
 nfc_card_t nfc_detect_card()
 {
     nfc_card_t card = { 0 };
+    nfc_card_t mifare_card = { 0 };
 
-    if (nfc_detect_mifare(&card) ||
-        nfc_detect_felica(&card) ||
-        nfc_detect_vicinity(&card)) {
-
-        update_last_card(&card);
-        if (card.card_type == NFC_CARD_FELICA) {
-            if (memcmp(card.syscode, "\x88\xB4", 2) == 0) {
-                update_card_name(CARD_AIC, false);
-            } else if (memcmp(card.syscode, "\x00\x03", 2) == 0) {
-                update_card_name(CARD_SUICA, true);
-            }
-        } else if (card.card_type == NFC_CARD_MIFARE) {
-            update_card_name(CARD_MIFARE, false);
-        } else if (card.card_type == NFC_CARD_VICINITY) {
-            update_card_name(CARD_VICINITY, false);
+    if (nfc_detect_mifare(&mifare_card)) {
+        bool is_bana = detect_mifare_bana(&mifare_card);
+        if (!is_bana && detect_later_felica(&card)) {
+            update_last_card(&card);
+            report_detected_card(&card);
+            return card;
         }
 
+        card = mifare_card;
+        update_last_card(&card);
+        update_card_name(is_bana ? CARD_BANA : CARD_MIFARE, is_bana);
+        return card;
+    }
+
+    if (nfc_detect_felica(&card) || nfc_detect_vicinity(&card)) {
+        update_last_card(&card);
+        report_detected_card(&card);
         return card;
     }
 
@@ -475,6 +560,13 @@ uint16_t nfc_last_syscode()
 
 static void identify_felica()
 {
+    if (last_meta.syscode != FELICA_SYSCODE_AIC) {
+        if (felica_syscode_is_suica_compatible(last_meta.syscode)) {
+            update_card_name(CARD_SUICA, true);
+        }
+        return;
+    }
+
     nfc_felica_read(0x000b, 0x8082, last_card.uid);
 }
 
@@ -610,6 +702,36 @@ bool nfc_felica_read(uint16_t svc_code, uint16_t block_id, uint8_t block_data[16
     }
 
     return read_ok;
+}
+
+bool nfc_felica_read_blocks(uint16_t svc_code, uint8_t block_count,
+                            const uint16_t block_ids[], uint8_t block_data[][16])
+{
+    if (!api[nfc_module].felica_read_blocks) {
+        return false;
+    }
+
+    bool read_ok = api[nfc_module].felica_read_blocks(svc_code, block_count, block_ids, block_data);
+
+    if (read_ok && (svc_code == 0x000b)) {
+        for (uint8_t i = 0; i < block_count; i++) {
+            if (block_ids[i] == 0x8082) {
+                felica_report_name(block_data[i] + 8); // DFC
+                break;
+            }
+        }
+    }
+
+    return read_ok;
+}
+
+bool nfc_felica_write(uint16_t svc_code, uint16_t block_id, const uint8_t block_data[16])
+{
+    if (!api[nfc_module].felica_write) {
+        return false;
+    }
+
+    return api[nfc_module].felica_write(svc_code, block_id, block_data);
 }
 
 void nfc_select(int phase)

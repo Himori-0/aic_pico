@@ -11,9 +11,10 @@
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
 
+#include "nfc.h"
 #include "pn532.h"
 
-#define DEBUG(...) { if (0) printf(__VA_ARGS__); }
+#define DEBUG(...) { if (nfc_runtime.debug) printf(__VA_ARGS__); }
 
 #define IO_TIMEOUT_US 1000
 #define PN532_I2C_ADDRESS 0x24
@@ -70,7 +71,7 @@ static bool pn532_wait_ready()
 {
     uint8_t status = 0;
 
-    for (int retry = 0; retry < 30; retry++) {
+    for (int retry = 0; retry < 150; retry++) {
         if (pn532_read(&status, 1) == 1 && status == 0x01) {
             return true;
         }
@@ -407,7 +408,7 @@ bool pn532_mifare_read(uint8_t block_id, uint8_t block_data[16])
 
 int pn532_felica_command(uint8_t cmd, const uint8_t *param, uint8_t param_len, uint8_t *outbuf)
 {
-    int cmd_len = param_len + 11;
+    int cmd_len = param_len + 10;
     uint8_t cmd_buf[cmd_len + 1];
 
     cmd_buf[0] = felica_poll_cache.inlist_tag;
@@ -416,41 +417,77 @@ int pn532_felica_command(uint8_t cmd, const uint8_t *param, uint8_t param_len, u
     memcpy(cmd_buf + 3, felica_poll_cache.idm, 8);
     memcpy(cmd_buf + 11, param, param_len);
 
-    int ret = pn532_write_command(0x40, cmd_buf, sizeof(cmd_buf));
-    if (ret < 0) {
-        DEBUG("\nFailed send felica command");
-        return -1;
+    for (int retry = 0; retry < 3; retry++) {
+        int ret = pn532_write_command(0x40, cmd_buf, sizeof(cmd_buf));
+        if (ret < 0) {
+            DEBUG("\nFailed send felica command");
+            sleep_ms(5);
+            continue;
+        }
+
+        int result = pn532_read_response(0x40, readbuf, sizeof(readbuf));
+        if (result < 2) {
+            DEBUG("\nPN532 Felica response failed cmd=%02x retry=%d", cmd, retry);
+            sleep_ms(5);
+            continue;
+        }
+
+        int outlen = readbuf[1] - 1;
+        if (((readbuf[0] & 0x3f) == 0) && (result - 2 == outlen)) {
+            memmove(outbuf, readbuf + 2, outlen);
+            return outlen;
+        }
+
+        DEBUG("\nPN532 Felica bad response cmd=%02x result=%d retry=%d", cmd, result, retry);
+        sleep_ms(5);
     }
 
-    int result = pn532_read_response(0x40, readbuf, sizeof(readbuf));
-
-    int outlen = readbuf[1] - 1;
-    if ((readbuf[0] & 0x3f) != 0 || result - 2 != outlen) {
-        return -1;
-    }
-
-    memmove(outbuf, readbuf + 2, outlen);
-
-    return outlen;
+    return -1;
 }
 
 
-bool pn532_felica_read(uint16_t svc_code, uint16_t block_id, uint8_t block_data[16])
+bool pn532_felica_read_blocks(uint16_t svc_code, uint8_t block_count,
+                              const uint16_t block_ids[], uint8_t block_data[][16])
 {
-    uint8_t param[] = { 1, svc_code & 0xff, svc_code >> 8,
-                        1, block_id >> 8, block_id & 0xff };
-
-    int result = pn532_felica_command(0x06, param, sizeof(param), readbuf);
-
-    if (result != 12 + 16 || readbuf[9] != 0 || readbuf[10] != 0) {
-        DEBUG("\nPN532 Felica read failed [%04x:%04x]", svc_code, block_id);
-        memset(block_data, 0, 16);
-        return true; // we fake the result when it fails
+    if ((block_count == 0) || (block_count > 8)) {
+        return false;
     }
 
-    const uint8_t *result_data = readbuf + 12; 
-    memcpy(block_data, result_data, 16);
+    uint8_t param[4 + block_count * 2];
+    uint8_t pos = 0;
+    param[pos++] = 1;
+    param[pos++] = svc_code & 0xff;
+    param[pos++] = svc_code >> 8;
+    param[pos++] = block_count;
+    for (uint8_t i = 0; i < block_count; i++) {
+        param[pos++] = block_ids[i] >> 8;
+        param[pos++] = block_ids[i] & 0xff;
+    }
 
+    int result = pn532_felica_command(0x06, param, pos, readbuf);
+
+    if ((result != 12 + block_count * 16) ||
+        (readbuf[9] != 0) || (readbuf[10] != 0) || (readbuf[11] != block_count)) {
+        DEBUG("\nPN532 Felica read failed [%04x:%02x]", svc_code, block_count);
+        memset(block_data, 0, block_count * 16);
+        return false;
+    }
+
+    const uint8_t *result_data = readbuf + 12;
+    memcpy(block_data, result_data, block_count * 16);
+
+    return true;
+}
+
+bool pn532_felica_read(uint16_t svc_code, uint16_t block_id, uint8_t block_data[16])
+{
+    uint16_t block_ids[] = { block_id };
+    uint8_t blocks[1][16];
+    if (!pn532_felica_read_blocks(svc_code, 1, block_ids, blocks)) {
+        memset(block_data, 0, 16);
+        return false;
+    }
+    memcpy(block_data, blocks[0], 16);
     return true;
 }
 
@@ -461,16 +498,13 @@ bool pn532_felica_write(uint16_t svc_code, uint16_t block_id, const uint8_t bloc
     memcpy(param + 6, block_data, 16);
     int result = pn532_felica_command(0x08, param, sizeof(param), readbuf);
 
-    if (result < 0) {
-        DEBUG("\nPN532 Felica WRITE failed %d", result);
+    if ((result != 11) || (readbuf[0] != 0x09) || (readbuf[9] != 0) || (readbuf[10] != 0)) {
+        DEBUG("\nPN532 Felica WRITE failed [%04x:%04x]", svc_code, block_id);
         return false;
     }
 
-    DEBUG("\nPN532 Felica WRITE success ");
-    for (int i = 0; i < result; i++) {
-        printf(" %02x", readbuf[i]);
-    }
-    return false;
+    DEBUG("\nPN532 Felica WRITE success [%04x:%04x]", svc_code, block_id);
+    return true;
 }
 
 void pn532_select(int phase)
